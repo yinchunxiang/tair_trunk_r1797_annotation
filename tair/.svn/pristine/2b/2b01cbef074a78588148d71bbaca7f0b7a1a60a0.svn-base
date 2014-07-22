@@ -1,0 +1,2210 @@
+/*
+ * (C) 2007-2010 Alibaba Group Holding Limited
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *
+ * Version: $Id$
+ *
+ * Authors:
+ *   MaoQi <maoqi@taobao.com>
+ *
+ */
+#include "tair_client.hpp"
+#include "define.hpp"
+#include "util.hpp"
+#include "dump_data_info.hpp"
+#include "query_info_packet.hpp"
+#include "key_value_pack.hpp"
+
+namespace tair {
+
+   tair_client::tair_client()
+   {
+      is_config_server = false;
+      is_data_server = false;
+      //server_id = 0;
+      //m_slaveServerId = 0;
+      group_name = NULL;
+      cmd_line = NULL;
+      cmd_file_name = NULL;
+      is_cancel = false;
+      server_addr = NULL;
+      slave_server_addr = NULL;
+
+      key_format = 0;
+      default_area = 0;
+
+      cmd_map["help"] = &tair_client::do_cmd_help;
+      cmd_map["quit"] = &tair_client::do_cmd_quit;
+      cmd_map["exit"] = &tair_client::do_cmd_quit;
+      cmd_map["put"] = &tair_client::do_cmd_put;
+      cmd_map["incr"] = &tair_client::do_cmd_addcount;
+      cmd_map["get"] = &tair_client::do_cmd_get;
+      cmd_map["mget"] = &tair_client::do_cmd_mget;
+      cmd_map["remove"] = &tair_client::do_cmd_remove;
+      cmd_map["mremove"] = &tair_client::do_cmd_mremove;
+      cmd_map["delall"] = &tair_client::do_cmd_remove_area;
+      cmd_map["dump"] = &tair_client::do_cmd_dump_area;
+      cmd_map["stat"] = &tair_client::do_cmd_stat;
+      cmd_map["health"]=&tair_client::do_cmd_health;
+      cmd_map["hide"] = &tair_client::do_cmd_hide;
+      cmd_map["gethidden"] = &tair_client::do_cmd_get_hidden;
+      cmd_map["pput"] = &tair_client::do_cmd_prefix_put;
+      cmd_map["pputs"] = &tair_client::do_cmd_prefix_puts;
+      cmd_map["pget"] = &tair_client::do_cmd_prefix_get;
+      cmd_map["pgets"] = &tair_client::do_cmd_prefix_gets;
+      cmd_map["premove"] = &tair_client::do_cmd_prefix_remove;
+      cmd_map["premoves"] = &tair_client::do_cmd_prefix_removes;
+      cmd_map["pgethidden"] = &tair_client::do_cmd_prefix_get_hidden;
+      cmd_map["phide"] = &tair_client::do_cmd_prefix_hide;
+      cmd_map["phides"] = &tair_client::do_cmd_prefix_hides;
+      cmd_map["flowlimit"] = &tair_client::do_cmd_set_flow_limit_bound;
+      cmd_map["flowrate"] = &tair_client::do_cmd_get_flow_rate;
+
+      cmd_map["setstatus"] = &tair_client::do_cmd_setstatus;
+      cmd_map["getstatus"] = &tair_client::do_cmd_getstatus;
+      cmd_map["gettmpdownsvr"] = &tair_client::do_cmd_gettmpdownsvr;
+      cmd_map["resetserver"] = &tair_client::do_cmd_resetserver;
+      cmd_map["migrate_bucket"] = &tair_client::do_cmd_migrate_bucket;
+      cmd_map["flushmmt"] = &tair_client::do_cmd_flushmmt;
+      cmd_map["resetdb"] = &tair_client::do_cmd_resetdb;
+      cmd_map["set_migrate_wait"] = &tair_client::do_cmd_set_migrate_wait_ms;
+      cmd_map["stat_db"] = &tair_client::do_cmd_stat_db;
+      cmd_map["release_mem"] = &tair_client::do_cmd_release_mem;
+      cmd_map["backup_db"] = &tair_client::do_cmd_backup_db;
+      cmd_map["unload_backuped_db"] = &tair_client::do_cmd_unload_backuped_db;
+      cmd_map["pause_gc"] = &tair_client::do_cmd_pause_gc;
+      cmd_map["resume_gc"] = &tair_client::do_cmd_resume_gc;
+      cmd_map["start_balance"] = &tair_client::do_cmd_start_balance;
+      cmd_map["stop_balance"] = &tair_client::do_cmd_stop_balance;
+      cmd_map["set_balance_wait"] = &tair_client::do_cmd_set_balance_wait_ms;
+      cmd_map["pause_rsync"] = &tair_client::do_cmd_pause_rsync;
+      cmd_map["resume_rsync"] = &tair_client::do_cmd_resume_rsync;
+      cmd_map["set_config"] = &tair_client::do_cmd_set_config;
+      cmd_map["invalcmd"] = &tair_client::do_cmd_to_inval;
+      // cmd_map["additems"] = &tair_client::doCmdAddItems;
+   }
+
+   tair_client::~tair_client()
+   {
+      if (group_name) {
+         free(group_name);
+         group_name = NULL;
+      }
+      if (cmd_line) {
+         free(cmd_line);
+         cmd_line = NULL;
+      }
+      if (cmd_file_name) {
+         free(cmd_file_name);
+         cmd_file_name = NULL;
+      }
+    }
+
+   void tair_client::print_usage(char *prog_name)
+   {
+      fprintf(stderr, "%s -s server:port\n OR\n%s -c configserver:port -g groupname\n\n"
+              "    -s, --server           data server,default port:%d\n"
+              "    -c, --configserver     default port: %d\n"
+              "    -g, --groupname        group name\n"
+              "    -l, --cmd_line         exec cmd\n"
+              "    -q, --cmd_file         script file\n"
+              "    -h, --help             print this message\n"
+              "    -v, --verbose          print debug info\n"
+              "    -V, --version          print version\n\n",
+              prog_name, prog_name, TAIR_SERVER_DEFAULT_PORT, TAIR_CONFIG_SERVER_DEFAULT_PORT);
+   }
+
+   bool tair_client::parse_cmd_line(int argc, char *const argv[])
+   {
+      int opt;
+      const char *optstring = "s:c:g:hVvl:q:";
+      struct option longopts[] = {
+         {"server", 1, NULL, 's'},
+         {"configserver", 1, NULL, 'c'},
+         {"groupname", 1, NULL, 'g'},
+         {"cmd_line", 1, NULL, 'l'},
+         {"cmd_file", 1, NULL, 'q'},
+         {"help", 0, NULL, 'h'},
+         {"verbose", 0, NULL, 'v'},
+         {"version", 0, NULL, 'V'},
+         {0, 0, 0, 0}
+      };
+
+      opterr = 0;
+      while ((opt = getopt_long(argc, argv, optstring, longopts, NULL)) != -1) {
+         switch (opt) {
+            case 'c': {
+               if (server_addr != NULL && is_config_server == false) {
+                  return false;
+               }
+               //uint64_t id = tbsys::CNetUtil::strToAddr(optarg, TAIR_CONFIG_SERVER_DEFAULT_PORT);
+
+               if (server_addr == NULL) {
+                  server_addr = optarg;
+               } else {
+                  slave_server_addr = optarg;
+               }
+               is_config_server = true;
+            }
+               break;
+            case 's': {
+               if (server_addr != NULL && is_config_server == true) {
+                  return false;
+               }
+               server_addr = optarg;
+               is_data_server = true;
+               //server_id = tbsys::CNetUtil::strToAddr(optarg, TAIR_SERVER_DEFAULT_PORT);
+            }
+               break;
+            case 'g':
+               group_name = strdup(optarg);
+               break;
+            case 'l':
+               cmd_line = strdup(optarg);
+               break;
+            case 'q':
+               cmd_file_name = strdup(optarg);
+               break;
+            case 'v':
+               TBSYS_LOGGER.setLogLevel("DEBUG");
+               break;
+            case 'V':
+               fprintf(stderr, "BUILD_TIME: %s %s\n", __DATE__, __TIME__);
+               return false;
+            case 'h':
+               print_usage(argv[0]);
+               return false;
+         }
+      }
+      if (server_addr == NULL || (is_config_server == true && group_name == NULL)) {
+         print_usage(argv[0]);
+         return false;
+      }
+      return true;
+   }
+
+   cmd_call tair_client::parse_cmd(char *key, VSTRING &param)
+   {
+      cmd_call  cmdCall = NULL;
+      char *token;
+      while (*key == ' ') key++;
+      token = key + strlen(key);
+      while (*(token-1) == ' ' || *(token-1) == '\n' || *(token-1) == '\r') token --;
+      *token = '\0';
+      if (key[0] == '\0') {
+         return NULL;
+      }
+      token = strchr(key, ' ');
+      if (token != NULL) {
+         *token = '\0';
+      }
+      str_cmdcall_map_iter it = cmd_map.find(tbsys::CStringUtil::strToLower(key));
+      if (it == cmd_map.end()) {
+         return NULL;
+      } else {
+         cmdCall = it->second;
+      }
+      if (token != NULL) {
+         token ++;
+         key = token;
+      } else {
+         key = NULL;
+      }
+      param.clear();
+      while ((token = strsep(&key, " ")) != NULL) {
+         if (token[0] == '\0') continue;
+         param.push_back(token);
+      }
+      return cmdCall;
+   }
+
+   void tair_client::cancel()
+   {
+      is_cancel = true;
+   }
+
+   bool tair_client::start()
+   {
+      bool done = true;
+      client_helper.set_timeout(5000);
+      client_helper.set_force_service(true);
+      if (is_config_server) {
+         done = client_helper.startup(server_addr, slave_server_addr, group_name);
+      } else {
+        if(is_data_server) {
+          done = client_helper.directup(server_addr);
+        } else {
+          //done = client_helper.startup(server_id);
+          done = false;
+        }
+      }
+      if (done == false) {
+         fprintf(stderr, "%s cann't connect.\n", server_addr);
+         return false;
+      }
+
+      char buffer[CMD_MAX_LEN];
+      VSTRING param;
+
+      if (cmd_line != NULL) {
+         strcpy(buffer, cmd_line);
+         vector<char*> cmd_list;
+         tbsys::CStringUtil::split(buffer, ";", cmd_list);
+         for(uint32_t i=0; i<cmd_list.size(); i++) {
+            cmd_call this_cmd_call = parse_cmd(cmd_list[i], param);
+            if (this_cmd_call == NULL) {
+               continue;
+            }
+            (this->*this_cmd_call)(param);
+         }
+      } else if (cmd_file_name != NULL) {
+         FILE *fp = fopen(cmd_file_name, "rb");
+         if (fp != NULL) {
+            while(fgets(buffer, CMD_MAX_LEN, fp)) {
+               cmd_call this_cmd_call = parse_cmd(buffer, param);
+               if (this_cmd_call == NULL) {
+                  fprintf(stderr, "unknown command.\n\n");
+                  continue;
+               }
+               (this->*this_cmd_call)(param);
+            }
+            fclose(fp);
+         } else {
+            fprintf(stderr, "open failure: %s\n\n", cmd_file_name);
+         }
+      } else {
+         while (done) {
+#ifdef HAVE_LIBREADLINE
+           char *line = input(buffer, CMD_MAX_LEN);
+           if (line == NULL) break;
+#else
+            if (fprintf(stderr, "TAIR> ") < 0) break;
+            if (fgets(buffer, CMD_MAX_LEN, stdin) == NULL) {
+              break;
+            }
+#endif
+            cmd_call this_cmd_call = parse_cmd(buffer, param);
+            if (this_cmd_call == NULL) {
+               fprintf(stderr, "unknown command.\n\n");
+               continue;
+            }
+            if (this_cmd_call == &tair_client::do_cmd_quit) {
+               break;
+            }
+            (this->*this_cmd_call)(param);
+            is_cancel = false;
+         }
+      }
+
+      // stop
+      client_helper.close();
+
+      return true;
+   }
+
+   //! you should duplicate the result
+#ifdef HAVE_LIBREADLINE
+   char* tair_client::input(char *buffer, size_t size) {
+     static const char *prompt = "[0;31;40mTAIR>[0;37;40m ";
+     char *line = NULL;
+     while ((line = readline(prompt)) != NULL && *line == '\0') free(line);
+     if (line == NULL) return NULL;
+     update_history(line);
+     strncpy(buffer, line, size);
+     free(line);
+     return buffer;
+   }
+   void tair_client::update_history(const char *line) {
+     int i = 0;
+     HIST_ENTRY **the_history = history_list();
+     for (; i < history_length; ++i) {
+       HIST_ENTRY *hist = the_history[i];
+       if (strcmp(hist->line, line) == 0) {
+         break;
+       }
+     }
+     if (i == history_length) {
+       add_history(line);
+       return ;
+     }
+     HIST_ENTRY *hist = the_history[i];
+     for (; i < history_length - 1; ++i) {
+       the_history[i] = the_history[i+1];
+     }
+     the_history[i] = hist;
+   }
+#endif
+
+///////////////////////////////////////////////////////////////////////////////////////////////////
+   int64_t tair_client::ping(uint64_t server_id)
+   {
+       if (server_id == 0ul) {
+          return 0L;
+       }
+     int ping_count = 10;
+     int64_t total = 0;
+     for (int i = 0; i < ping_count; ++i) {
+       total += client_helper.ping(server_id);
+     }
+     return total / ping_count;
+   }
+   void tair_client::do_cmd_quit(VSTRING &param)
+   {
+      return ;
+   }
+
+   void tair_client::print_help(const char *cmd)
+   {
+      if (cmd == NULL || strcmp(cmd, "put") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : put key data [area] [expired]\n"
+                 "DESCRIPTION: area   - namespace , default: 0\n"
+                 "             expired- in seconds, default: 0,never expired\n"
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "incr") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : incr key [count] [initValue] [area]\n"
+                 "DESCRIPTION: initValue , default: 0\n"
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "get") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : get key [area]\n"
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "mget") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : mget key1 ... keyn area\n"
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "remove") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : remove key [area]\n"
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "mremove") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : mremove key1 ... keyn area\n"
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "delall") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : delall area [all | -s ip:port]\n"
+                 "DESCRIPTION: delete all data of area\n"
+                 );
+
+      }
+      if (cmd == NULL || strcmp(cmd, "stat") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : stat [-w -b -k -g -m] \n"
+                 "DESCRIPTION: get stat info\n"
+                 "             -w  display itemCount in W, 1W=10000\n"
+                 "             -b  display quota, dataSize, useSize in bytes\n"
+                 "             -k  display quota, dataSize, useSize in kilobytes, 1K=1024B\n"
+                 "             -m  display quota, dataSize, useSize in megabytes, 1M=1024K, this is default\n"
+                 "             -g  display quota, dataSize, useSize in gigabytes, 1G=1024M\n"
+                 "             short options can be put together, eg -wk= -w -k\n"
+                 );
+      }
+      if (cmd == NULL || strcmp(cmd, "health") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : health\n"
+                 "DESCRIPTION: get cluster health info\n"
+                 );
+      }
+      if (cmd == NULL || strcmp(cmd, "dump") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : dump dumpinfo.txt\n"
+                 "DESCRIPTION: dumpinfo.txt is a config file of dump,syntax:\n"
+                 "area start_time end_time,eg:"
+                 "10 2008-12-09 12:08:07 2008-12-10 12:10:00\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "setstatus") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : setstatus group status\n"
+                 "DESCRIPTION: set group to on or off\n"
+                 "\tgroup: groupname to set, status: on/off\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "getstatus") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : getstatus group1 group2...\n"
+                 "DESCRIPTION: get status of group(s)\n"
+                 "\tgroup[n]: groupnames of which to get status\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "flushmmt") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : flushmmt [ds_addr]\n"
+                 "DESCRIPTION: flush memtable of all tairserver or specified `ds_addr. WARNING: use this cmd carefully\n"
+                 "\tds_addr: address of tairserver\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "resetdb") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : resetdb [ds_addr]\n"
+                 "DESCRIPTION: reset db of all tairserver or specified `ds_addr. WARNING: use this cmd carefully\n"
+                 "\tds_addr: address of tairserver\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "hide") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: hide [area] key\n"
+            "DESCRIPTION: to hide one item\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "gethidden") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: gethidden [area] key\n"
+            "DESCRIPTION: to get one hidden item\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "pput") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: pput [area] pkey skey value\n"
+            "DESCRIPTION: to put one item with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "pget") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: pget [area] pkey skey\n"
+            "DESCRIPTION: to get one item with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "pgets") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: pgets area pkey skey1 skey2...skeyn\n"
+            "DESCRIPTION: to get multiple items with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "pputs") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: pputs area pkey skey1 value1 skey2 value2...skeyn valuen\n"
+            "DESCRIPTION: to put multiple items with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "premove") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: premove [area] pkey skey\n"
+            "DESCRIPTION: to remove one item with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "premoves") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: premoves area pkey skey1...skeyn\n"
+            "DESCRIPTION: to remove multiple items with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "pgethidden") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: pgethidden [area] pkey skey\n"
+            "DESCRIPTION: to get one hidden item with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "invalcmd") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS(0)   : invalcmd [retryall [ip:port] | retrieve | info ip::iport | dumpkey all[ip:port] on[off]]\n"
+                 "DESCRIPTION: retry all request, retrieve all inval servers, get the inval server's info."
+            );
+      }
+      if (cmd == NULL || strcmp(cmd, "phide") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: phide [area] pkey skey\n"
+            "DESCRIPTION: to hide one item with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "phides") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: phides area pkey skey1...skeyn\n"
+            "DESCRIPTION: to hide multiple items with prefix\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "flowlimit") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: flowlimit ns lower upper type, example flowlimit 123 30000 40000 ops\n"
+            "DESCRIPTION: set or view flow limit bound\n");
+      }
+      if (cmd == NULL || strcmp(cmd, "flowrate") == 0) {
+        fprintf(stderr,
+            "------------------------------------------------\n"
+            "SYNOPSIS: flowrate ns \n"
+            "DESCRIPTION: view flow rate\n");
+      }
+
+      if (cmd == NULL || strcmp(cmd, "gettmpdownsvr") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : gettmpdownsvr group1 group2...\n"
+                 "DESCRIPTION: get tmp down servers of group(s)\n"
+                 "\tgroup[n]: groupnames of which to get status\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "resetserver") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : resetserver group [ds_addr ds_addr]\n"
+                 "DESCRIPTION: clear the all or some specified by `ds_addr down server in group, namely 'tmp_down_server' in group.conf\n"
+                 "\tgroup: groupname to reset\n"
+                 "\tds_addr: dataserver to reset\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "migrate_bucket") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : migrate_bucket group bucket_no copy_no src_ds_addr(ip:port) dest_ds_addr(ip:port)\n"
+                 "DESCRIPTION: force migrate bucket bucket_no from src_ds_addr to dest_ds_addr\n"
+                 "\tgroup: groupname to migrate\n"
+                 "\tbucket_no: bucket_no to migrate\n"
+                 "\tcopy_no: which copy of bucket_no to migrate\n"
+                 "\tsrc_ds_addr: who hold this copy of bucket_no, for check\n"
+                 "\tdest_ds_addr: migrate destnation\n"
+            );
+      }
+
+      if (cmd == NULL || strcmp(cmd, "set_migrate_wait") == 0) {
+         fprintf(stderr,
+                 "------------------------------------------------\n"
+                 "SYNOPSIS   : set_migrate_wait time_ms [ds_addr]\n"
+                 "DESCRIPTION: set migrate wait  time ms to all or one specified by `ds_addr\n"
+                 "\ttime_ms : time in ms unit\n"
+                 "\tds_addr : specified dataserver address\n"
+            );
+      }
+
+      fprintf(stderr, "\n");
+   }
+
+   void tair_client::do_cmd_help(VSTRING &param)
+   {
+      if (param.size() == 0U) {
+         print_help(NULL);
+      } else {
+         print_help(param[0]);
+      }
+      return;
+   }
+
+   char *tair_client::canonical_key(char *key, char **akey, int *size)
+   {
+      char *pdata = key;
+      if (key_format == 1) { // java
+         *size = strlen(key)+2;
+         pdata = (char*)malloc(*size);
+         pdata[0] = '\0';
+         pdata[1] = '\4';
+         memcpy(pdata+2, key, strlen(key));
+         *akey = pdata;
+      } else if (key_format == 2) { // raw
+         pdata = (char*)malloc(strlen(key)+1);
+         util::string_util::conv_raw_string(key, pdata, size);
+         *akey = pdata;
+      } else {
+         *size = strlen(key)+1;
+      }
+
+      return pdata;
+   }
+
+   void tair_client::do_cmd_put(VSTRING &param)
+   {
+      if (param.size() < 2U || param.size() > 4U) {
+         print_help("put");
+         return;
+      }
+      int area = default_area;
+      int expired = 0;
+      if (param.size() > 2U) area = atoi(param[2]);
+      if (param.size() > 3U) expired = atoi(param[3]);
+
+      char *akey = NULL;
+      int pkeysize = 0;
+      char *pkey = canonical_key(param[0], &akey, &pkeysize);
+      data_entry key(pkey, pkeysize, false);
+      data_entry data(param[1], false);
+
+      int ret = client_helper.put(area, key, data, expired, 0);
+      fprintf(stderr, "put: %s\n", client_helper.get_error_msg(ret));
+
+      if (akey) free(akey);
+   }
+
+   void tair_client::do_cmd_addcount(VSTRING &param)
+   {
+      if (param.size() < 1U) {
+         print_help("incr");
+         return ;
+      }
+      int count = 1;
+      int initValue = 0;
+      int area = default_area;
+      if (param.size() > 1U) count = atoi(param[1]);
+      if (param.size() > 2U) initValue = atoi(param[2]);
+      if (param.size() > 3U) area = atoi(param[3]);
+
+      char *akey = NULL;
+      int pkeysize = 0;
+      char *pkey = canonical_key(param[0], &akey, &pkeysize);
+      data_entry key(pkey, pkeysize, false);
+
+      // put
+      int retCount = 0;
+      int ret = client_helper.add_count(area, key, count, &retCount, initValue);
+
+      if (ret != TAIR_RETURN_SUCCESS) {
+         fprintf(stderr, "add failed:%d,%s.\n", ret,client_helper.get_error_msg(ret));
+      } else {
+         fprintf(stderr, "retCount: %d\n", retCount);
+      }
+      if (akey) free(akey);
+
+      return;
+   }
+
+   void tair_client::do_cmd_get(VSTRING &param)
+   {
+      if (param.size() < 1U || param.size() > 2U ) {
+         print_help("get");
+         return;
+      }
+      int area = default_area;
+      if (param.size() >= 2U) {
+         char *p=param[1];
+         if (*p == 'n') {
+            area |= TAIR_FLAG_NOEXP;
+            p ++;
+         }
+         area |= atoi(p);
+      }
+      char *akey = NULL;
+      int pkeysize = 0;
+      char *pkey = canonical_key(param[0], &akey, &pkeysize);
+      data_entry key(pkey, pkeysize, false);
+      data_entry *data = NULL;
+
+      // get
+      int ret = client_helper.get(area, key, data);
+      if (ret != TAIR_RETURN_SUCCESS) {
+         fprintf(stderr, "get failed: %s.\n",client_helper.get_error_msg(ret));
+      } else if (data != NULL) {
+         char *p = util::string_util::conv_show_string(data->get_data(), data->get_size());
+         fprintf(stderr, "KEY: %s, LEN: %d\n raw data: %s, %s\n", param[0], data->get_size(), data->get_data(), p);
+         free(p);
+         delete data;
+      }
+      if (akey) free(akey);
+      return ;
+   }
+
+   void tair_client::do_cmd_mget(VSTRING &param)
+   {
+      if (param.size() < 2U) {
+         print_help("mget");
+         return;
+      }
+      int area = default_area;
+      char *p=param[param.size() -1];
+      if (*p == 'n') {
+        area |= TAIR_FLAG_NOEXP;
+        p ++;
+      }
+      area |= atoi(p);
+      fprintf(stderr, "mget area: %d\n", area);
+
+      vector<data_entry*> keys;
+      for (int i = 0; i < static_cast<int>(param.size() - 1); ++i)
+      {
+        char *akey = NULL;
+        int pkeysize = 0;
+        fprintf(stderr, "mget key index: %u, key: %s\n", i, param[i]);
+        char *pkey = canonical_key(param[i], &akey, &pkeysize);
+        data_entry* key = new data_entry(pkey, pkeysize, false);
+        keys.push_back(key);
+        if (akey) free(akey);
+      }
+      tair_keyvalue_map datas;
+
+      // mget
+      int ret = client_helper.mget(area, keys, datas);
+      if (ret == TAIR_RETURN_SUCCESS || ret == TAIR_RETURN_PARTIAL_SUCCESS)
+      {
+        tair_keyvalue_map::iterator mit = datas.begin();
+        for ( ; mit != datas.end(); ++mit)
+        {
+          char *key = util::string_util::conv_show_string(mit->first->get_data(), mit->first->get_size());
+          char *data = util::string_util::conv_show_string(mit->second->get_data(), mit->second->get_size());
+          fprintf(stderr, "KEY: %s, RAW VALUE: %s, VALUE: %s, LEN: %d\n",
+              key, mit->second->get_data(), data, mit->second->get_size());
+          free(key);
+          free(data);
+        }
+        fprintf(stderr, "get success, ret: %d.\n", ret);
+      }
+      else
+      {
+         fprintf(stderr, "get failed: %s, ret: %d.\n", client_helper.get_error_msg(ret), ret);
+      }
+
+      vector<data_entry*>::iterator vit = keys.begin();
+      for ( ; vit != keys.end(); ++vit)
+      {
+        delete *vit;
+        (*vit) = NULL;
+      }
+      tair_keyvalue_map::iterator kv_mit = datas.begin();
+      for ( ; kv_mit != datas.end(); )
+      {
+        data_entry* key = kv_mit->first;
+        data_entry* value = kv_mit->second;
+        datas.erase(kv_mit++);
+        delete key;
+        key = NULL;
+        delete value;
+        value = NULL;
+      }
+      return ;
+   }
+
+// remove
+   void tair_client::do_cmd_remove(VSTRING &param)
+   {
+      if (param.size() < 2U) {
+         print_help("remove");
+         return;
+      }
+
+      int area = default_area;
+      if (param.size() >= 2U) area = atoi(param[1]);
+
+      char *akey = NULL;
+      int pkeysize = 0;
+      char *pkey = canonical_key(param[0], &akey, &pkeysize);
+      data_entry key(pkey, pkeysize, false);
+
+      int ret = client_helper.remove(area, key);
+      fprintf(stderr, "remove: %s.\n", client_helper.get_error_msg(ret));
+      if (akey) free(akey);
+      return ;
+   }
+
+  const char * FlowStatusStr(tair::stat::FlowStatus status) {
+    switch (status) {
+     case tair::stat::UP:
+      return "UP";
+     case tair::stat::KEEP:
+      return "KEEP";
+     case tair::stat::DOWN:
+      return "DOWN";
+    }
+    return "UNKNOW";
+  }
+
+  void tair_client::do_cmd_get_flow_rate(VSTRING &param)
+  {
+    if (param.size() < 1U) {
+      print_help("flowrate"); 
+      return ;
+    }
+    int ns = atoi(param[0]);
+
+    set<uint64_t> servers;
+    client_helper.get_servers(servers);
+    size_t success = 0;
+    for (set<uint64_t>::iterator iter = servers.begin(); iter != servers.end(); ++iter) {
+      uint64_t addr = *iter;
+      tair::stat::Flowrate rate;
+      int ret = client_helper.get_flow(addr, ns, rate);
+
+      if (ret == 0) {
+        fprintf(stderr, "success %s \tns:%d \tin:%d,%s \tout:%d,%s \tops:%d,%s \tstatus:%s\n", 
+            tbsys::CNetUtil::addrToString(addr).c_str(), ns,
+            rate.in, FlowStatusStr(rate.in_status),
+            rate.out, FlowStatusStr(rate.out_status),
+            rate.ops, FlowStatusStr(rate.ops_status),
+            FlowStatusStr(rate.status));
+        success++;
+      } else {
+        fprintf(stderr, "fail %s \terr:%d\n", tbsys::CNetUtil::addrToString(addr).c_str(), ret);
+      }
+    }
+    if (success == servers.size()) {
+      fprintf(stderr, "all success\n");
+    } else if (success == 0) {
+      fprintf(stderr, "all fail\n");
+    } else {
+      fprintf(stderr, "part success\n");
+    }
+  }
+
+  void tair_client::do_cmd_set_flow_limit_bound(VSTRING &param)
+  {
+    if (param.size() < 4U) {
+      print_help("flowlimit"); 
+      return ;
+    }
+    int ns = atoi(param[0]);
+    int lower = atoi(param[1]);
+    int upper = atoi(param[2]);
+
+    char *strtemp = NULL;
+    int typestr_len = 0;
+    char *typestr = canonical_key(param[3], &typestr, &typestr_len);
+    tair::stat::FlowType type = tair::stat::IN;
+    if (strncmp("in", typestr, 2) == 0)
+      type = tair::stat::IN;
+    else if (strncmp("out", typestr, 3) == 0)
+      type = tair::stat::OUT;
+    else if (strncmp("ops", typestr, 3) == 0)
+      type = tair::stat::OPS;
+    else {
+      fprintf(stderr, "unknow type:%s just support [in, out, ops]", typestr);
+      return ;
+    }
+    set_flow_limit_bound(ns, lower, upper, type);
+    if (strtemp != NULL)
+      free(strtemp);
+  }
+
+  const char * FlowTypeStr(tair::stat::FlowType type)
+  {
+    switch (type) {
+      case tair::stat::IN:
+        return "in";
+      case tair::stat::OUT:
+        return "out";
+      case tair::stat::OPS:
+        return "ops";
+    }
+    return "unknow";
+  }
+
+  void tair_client::set_flow_limit_bound(int ns, int lower, int upper, tair::stat::FlowType type)
+  {
+    set<uint64_t> servers;
+    client_helper.get_servers(servers);
+    size_t success = 0;
+    for (set<uint64_t>::iterator iter = servers.begin(); iter != servers.end(); ++iter) {
+      uint64_t addr = *iter;
+      int local_ns = ns;
+      int local_lower = lower;
+      int local_upper = upper;
+      tair::stat::FlowType local_type = type;
+      int ret = client_helper.set_flow_limit_bound(addr, local_ns, 
+          local_lower, 
+          local_upper, 
+          local_type);
+
+      if (ret == 0) {
+        fprintf(stderr, "success %s \tns:%d \tlower:%d \tupper:%d \ttype:%s\n", 
+            tbsys::CNetUtil::addrToString(addr).c_str(),
+            local_ns, local_lower, local_upper, FlowTypeStr(local_type));
+        success++;
+      } else {
+        fprintf(stderr, "fail %s \terr:%d\n", tbsys::CNetUtil::addrToString(addr).c_str(), ret);
+      }
+    }
+    if (success == servers.size()) {
+      fprintf(stderr, "all success\n");
+    } else if (success == 0) {
+      fprintf(stderr, "all fail\n");
+    } else {
+      fprintf(stderr, "part success\n");
+    }
+  }
+
+   void tair_client::do_cmd_mremove(VSTRING &param)
+   {
+      if (param.size() < 2U ) {
+         print_help("mremove");
+         return;
+      }
+      int area = default_area;
+      char *p=param[param.size() -1];
+      if (*p == 'n') {
+        area |= TAIR_FLAG_NOEXP;
+        p ++;
+      }
+      area |= atoi(p);
+      fprintf(stderr, "mremove area: %d\n", area);
+
+      vector<data_entry*> keys;
+      for (int i = 0; i < static_cast<int>(param.size() - 1); ++i)
+      {
+        char *akey = NULL;
+        int pkeysize = 0;
+        fprintf(stderr, "mremove key index: %u, key: %s\n", i, param[i]);
+        char *pkey = canonical_key(param[i], &akey, &pkeysize);
+        data_entry* key = new data_entry(pkey, pkeysize, false);
+        keys.push_back(key);
+        if (akey) free(akey);
+        //todo delete key
+      }
+
+      int ret = client_helper.mdelete(area, keys);
+      fprintf(stderr, "mremove: %s, ret: %d\n", client_helper.get_error_msg(ret), ret);
+      vector<data_entry*>::iterator vit = keys.begin();
+      for ( ; vit != keys.end(); ++vit)
+      {
+        delete *vit;
+        (*vit) = NULL;
+      }
+      return ;
+   }
+
+   void tair_client::do_cmd_stat(VSTRING &param)
+   {
+      if (is_data_server) {
+         fprintf(stderr, "direct connect to ds, can not use stat\n");
+         return;
+      }
+      
+      enum{ quota=0,
+            quotaUsage,
+            dataSize,
+            useSize,
+            evictCount,
+            getCount,
+            hitCount,
+            hitRate,
+            itemCount,
+            putCount,
+            removeCount,
+            columnEnd
+      };
+      int size_unit=1024*1024, itemCount_unit=1;
+      static  char *print_first_line[]={(char*)"quota(M)", (char*)"quotaUsage", (char*)"dataSize(M)", (char*)"useSize(M)", (char*)"evictCount", (char*)"getCount", (char*)"hitCount", (char*)"hitRate", (char*)"itemCount", (char*)"putCount", (char*)"removeCount"};
+      //these values may be modified by last stat execute, so need to assign them the default value;
+      print_first_line[quota]=(char*)"quota(M)";
+      print_first_line[dataSize]=(char*)"dataSize(M)";
+      print_first_line[useSize]=(char*)"useSize(M)";
+      print_first_line[itemCount]=(char*)"itemCount";
+
+      // option -b -k -m -g -w
+      int argc=param.size()+1;
+      if(argc>50){   // 50 would be enough
+          fprintf(stderr,"the number of options should be less than 50\n");
+          return;
+      }
+      char *argv[50]; 
+      memcpy(argv+1, &param[0],sizeof(char*)*(argc-1));
+      int ch;
+      optind=1; // very important, it has been modified by function parse_cmd_line();
+      while( (ch=getopt(argc,argv,"wbkmg") )!=-1){
+         switch(ch){
+         case 'w': itemCount_unit=10000;     print_first_line[itemCount]=(char*)"itemCount(W)"; break;
+         case 'b': size_unit=1;              print_first_line[quota]=(char*)"quota(B)"; print_first_line[dataSize]=(char*)"dataSize(B)"; print_first_line[useSize]=(char*)"useSize(B)";  break;
+         case 'k': size_unit=1024;           print_first_line[quota]=(char*)"quota(K)"; print_first_line[dataSize]=(char*)"dataSize(K)"; print_first_line[useSize]=(char*)"useSize(K)";  break;
+         case 'm': size_unit=1024*1024;      print_first_line[quota]=(char*)"quota(M)"; print_first_line[dataSize]=(char*)"dataSize(M)"; print_first_line[useSize]=(char*)"useSize(M)";  break;
+         case 'g': size_unit=1024*1024*1024; print_first_line[quota]=(char*)"quota(G)"; print_first_line[dataSize]=(char*)"dataSize(G)"; print_first_line[useSize]=(char*)"useSize(G)";  break;
+         case '?': print_help("stat");    return;
+         }
+      }
+      if(optind<argc){
+         print_help("stat");
+         return;
+      }
+
+      map<string, int>  column_map;
+      column_map["dataSize"]=dataSize;
+      column_map["useSize"]=useSize;
+      column_map["evictCount"]=evictCount;
+      column_map["getCount"]=getCount;
+      column_map["hitCount"]=hitCount;
+      column_map["hitRate"]=hitRate;
+      column_map["itemCount"]=itemCount;
+      column_map["putCount"]=putCount;
+      column_map["removeCount"]=removeCount;
+
+      //store area info, server_info, server_area_info
+      typedef map<string, double*> info_map;
+      info_map::iterator info_iter;
+      pair<info_map::iterator, bool> result_insert;
+      double *info_line;
+
+      map<string, string> out_info;
+      map<string, string>::iterator it;
+      string group = group_name;
+
+      char area[16],column_name[48];
+      int column;
+
+      //get stat of area.
+      //dataSize, useSize, evictCount, getCount, hitCount, itemCount, putCount, removeCount
+      //out_info:<"x dataSize","xxx">, <"x userSize", "xxx"> ... <"x removeCount", "xxx">
+      //         <"y dataSize","yyy">, <"y userSize", "yyy"> ... <"y removeCount", "yyy">
+      //         ......
+      info_map  area_info_map;
+
+      client_helper.query_from_configserver(request_query_info::Q_STAT_INFO, group, out_info, 0);
+      for(it=out_info.begin(); it !=out_info.end(); ++it){
+         sscanf(it->first.c_str(),"%s %s",area, column_name);
+         column=column_map[column_name];
+
+         result_insert=area_info_map.insert(info_map::value_type(area,0));
+         if(result_insert.second) {// area_info_map[area] didn't exist before and now is insert.  if false, area_info_map[area] exists, nothing is done.
+            result_insert.first->second=(double *)malloc(columnEnd*sizeof(double));
+            assert (result_insert.first->second !=NULL);
+            memset(result_insert.first->second,0,columnEnd*sizeof(double));
+         }
+         result_insert.first->second[column]=atof(it->second.c_str());
+      }
+
+      //get quota of area
+      // out_info: <"area(xx)","xxxx">, <"area(yy)","yyyy">, ......
+      client_helper.query_from_configserver(request_query_info::Q_AREA_CAPACITY, group, out_info);
+      int area_int;
+      for(it=out_info.begin(); it !=out_info.end(); ++it){
+         // "area(xxxx)",  xxxx---> area_int
+         sscanf(it->first.c_str()+5,"%d",&area_int);
+         sprintf(area,"%d",area_int);
+
+         //get eare_info_map[area]
+         result_insert=area_info_map.insert(info_map::value_type(area,0));
+         if(result_insert.second) {// area_info_map[area] didn't exist before and now is insert.  if false, area_info_map[area] exists, nothing is done.
+            result_insert.first->second=(double *)malloc(columnEnd*sizeof(double));
+            assert (result_insert.first->second !=NULL);
+            memset(result_insert.first->second,0,columnEnd*sizeof(double));
+         }
+         //update area_info_map[area]
+         result_insert.first->second[quota]=atof(it->second.c_str());
+      }
+
+      //get the datasever set
+      set<uint64_t> dataserver_set;
+      set<uint64_t>::iterator server_set_iter;
+      
+      client_helper.get_servers(dataserver_set);
+
+      // get dataserver info, dataserver-area info
+      info_map server_info_map;
+      info_map server_area_info_map;
+      
+      string server;
+      string server_area;
+      
+      for(server_set_iter=dataserver_set.begin(); server_set_iter!=dataserver_set.end(); ++server_set_iter){
+         server=tbsys::CNetUtil::addrToString(*server_set_iter);
+
+         //info_line=server_info_map[server], if server_info_map[server] didn't exist, insert it;
+         result_insert=server_info_map.insert(info_map::value_type(server,0));
+         if(result_insert.second) {//server_info_map[server] didn't exist before and now is insert.  if false, server_info_map[server] exists, nothing is done.
+            result_insert.first->second=(double *)malloc(columnEnd*sizeof(double));
+            assert (result_insert.first->second !=NULL);
+            memset(result_insert.first->second,0,columnEnd*sizeof(double));
+         }
+         info_line=result_insert.first->second;
+         
+         client_helper.query_from_configserver(request_query_info::Q_STAT_INFO, group, out_info, (*server_set_iter));
+         //out_info:<"x dataSize","xxx">, <"x userSize", "xxx"> ... <"x removeCount", "xxx">
+         //         <"y dataSize","yyy">, <"y userSize", "yyy"> ... <"y removeCount", "yyy">
+         for(it=out_info.begin(); it!=out_info.end(); ++it){
+            sscanf(it->first.c_str(),"%s %s",area, column_name);
+            server_area=server+':'+area;
+            column=column_map[column_name];
+
+            //get server_area_info_map[server_area]
+            result_insert=server_area_info_map.insert(info_map::value_type(server_area,0));
+            if(result_insert.second) {
+               result_insert.first->second=(double *)malloc(columnEnd*sizeof(double));
+               assert (result_insert.first->second !=NULL);
+               memset(result_insert.first->second,0,columnEnd*sizeof(double));
+            }
+            //update server_area_info_map[server_area]
+            result_insert.first->second[column]=atof(it->second.c_str());
+            //update server_info_map[server]
+            info_line[column]+=result_insert.first->second[column];
+         }
+         
+      }
+
+      
+      // get  dataserver-area info quota
+      string::size_type area_pos;
+      double quota_tmp;
+      set<uint64_t>::size_type server_nr=dataserver_set.size();
+      for(info_iter=server_area_info_map.begin(); info_iter!=server_area_info_map.end(); ++info_iter ){
+         area_pos=info_iter->first.find_last_of(':');
+         quota_tmp=area_info_map[(info_iter->first).substr(area_pos+1)][quota];
+         info_iter->second[quota]=quota_tmp/server_nr;
+      }
+
+      //get server quota, will be got later
+      //......
+
+      //***********************print and free all what's is malloced*************************************      
+      info_map *array[3];
+      int i;
+      array[0]=&area_info_map;
+      array[1]=&server_info_map;
+      array[2]=&server_area_info_map;
+
+
+      fprintf(stderr,"%-22s %-9s %-10s %-11s %-10s %-10s %-8s %-8s %-7s %-12s %-8s %-11s\n", "area", print_first_line[quota], print_first_line[quotaUsage], print_first_line[dataSize], print_first_line[useSize], print_first_line[evictCount], print_first_line[getCount], print_first_line[hitCount], print_first_line[hitRate], print_first_line[itemCount], print_first_line[putCount], print_first_line[removeCount]);
+      for(i=0; i<3; ++i){
+          for(info_iter=array[i]->begin(); info_iter!=array[i]->end(); ++info_iter) {
+              info_line=info_iter->second;
+              // update quotaUsage and hitRate
+              if( info_line[quota] !=0 )
+                  info_line[quotaUsage]=info_line[useSize]/info_line[quota];
+              if( info_line[getCount] !=0)
+                  info_line[hitRate]=info_line[hitCount]/info_line[getCount];
+              //updatge quota, dataSize, UseSize and itemCount uint
+              info_line[quota]/=size_unit;
+              info_line[dataSize]/=size_unit;
+              info_line[useSize]/=size_unit;
+              info_line[itemCount]/=itemCount_unit;
+              
+              //print info_line
+              if(i==1) // server_info_map
+                 fprintf(stderr,"%-22s %-9s %-10s %-11.0lf %-10.0lf %-10.0lf %-8.0lf %-8.0lf %-7.2lf %-12.0lf %-8.0lf %-11.0lf\n",
+                      info_iter->first.c_str(), "***" , "***", info_line[dataSize], info_line[useSize], info_line[evictCount], info_line[getCount], info_line[hitCount], info_line[hitRate], info_line[itemCount], info_line[putCount], info_line[removeCount]);
+
+              else  // area_info_map and server_erea_info_map
+                 fprintf(stderr,"%-22s %-9.0lf %-10.2lf %-11.0lf %-10.0lf %-10.0lf %-8.0lf %-8.0lf %-7.2lf %-12.0lf %-8.0lf %-11.0lf\n",
+                      info_iter->first.c_str(), info_line[quota], info_line[quotaUsage], info_line[dataSize], info_line[useSize], info_line[evictCount], info_line[getCount], info_line[hitCount], info_line[hitRate], info_line[itemCount], info_line[putCount], info_line[removeCount]);
+
+              //free the malloced memory, important
+              free(info_line); 
+          }
+          fprintf(stderr,"\n");
+      }//end of for(i=0; i<3; ++i)
+   }
+
+   void tair_client::do_cmd_health(VSTRING &param){
+
+      if (is_data_server) {
+         fprintf(stderr, "direct connect to ds, can not use health\n");
+         return;
+      }
+
+      if(param.size() !=0 ){
+         print_help("health");
+         return ;
+      }
+
+      map<string, string> out_info;
+      map<string, string>::iterator it;
+      string group = group_name;
+
+      //************************************************************      
+      // print the DataServer status.
+      client_helper.query_from_configserver(request_query_info::Q_DATA_SERVER_INFO, group, out_info);
+      fprintf(stderr,"%20s %20s\n","server","status");
+      for (it=out_info.begin(); it != out_info.end(); it++)
+          fprintf(stderr,"%20s %20s\n", it->first.c_str(), it->second.c_str());
+      fprintf(stderr,"\n");
+
+      //************************************************************      
+      //print the migrate info.
+      client_helper.query_from_configserver(request_query_info::Q_MIG_INFO, group, out_info);
+      fprintf(stderr,"%20s %20s\n","migrate","ongoing");
+
+      for (it=out_info.begin(); it != out_info.end(); it++)
+          fprintf(stderr,"%20s %20s\n", it->first.c_str(), it->second.c_str());
+      fprintf(stderr,"\n");
+
+      //************************************************************      
+      //print the ping time to each DataServer
+      set<uint64_t> servers;
+      int64_t ping_time;
+      client_helper.get_servers(servers);
+      fprintf(stderr,"%20s %20s\n","server","ping");
+      for (set<uint64_t>::iterator it = servers.begin(); it != servers.end(); ++it) {
+         ping_time = ping(*it);
+         fprintf(stderr,"%20s %20lf\n", tbsys::CNetUtil::addrToString(*it).c_str(), ping_time / 1000.);
+      }
+      fprintf(stderr,"\n");
+
+   }
+    
+   void tair_client::do_cmd_remove_area(VSTRING &param)
+   {
+      if (param.size() < 2U) {
+         print_help("delall");
+         return;
+      }
+      int area = atoi(param[0]);
+      if(area < 0){
+         return;
+      }
+      // remove
+      int ret = TAIR_RETURN_SUCCESS;
+      if (strncmp("all", param[1], 3) == 0)
+      {
+        std::set<uint64_t> ds_set;
+        //remove all ds in the cluster.
+        client_helper.get_servers(ds_set);
+        for (std::set<uint64_t>::iterator it = ds_set.begin(); it != ds_set.end(); it++)
+        {
+          ret = client_helper.remove_area(area, *it);
+          fprintf(stderr, "removeArea: area:%d, ds: %s, %s\n", area,
+              tbsys::CNetUtil::addrToString(*it).c_str(),
+              client_helper.get_error_msg(ret));
+        }
+      }
+      else if (strncmp("-s", param[1], 2) == 0)
+      {
+        //remove area on special ds.
+        if (param.size() != 3U)
+        {
+          print_help("delall");
+        }
+        else
+        {
+          //if id is not avaliable, `remove_area returns `invalid_args code.
+          std::string ipport = param[2];
+          size_t pos = ipport.find_first_of(':');
+          if (pos == std::string::npos || pos == ipport.size())
+          {
+            fprintf(stderr, "should be ip:port, %s", ipport.c_str());
+            print_help("delall");
+          }
+          else
+          {
+            std::string ipstr = ipport.substr(0, pos);
+            std::string portstr = ipport.substr(pos + 1, ipport.size());
+            uint64_t id = tbsys::CNetUtil::strToAddr(ipstr.c_str(), atoi(portstr.c_str()));
+            ret = client_helper.remove_area(area, id);
+            fprintf(stderr, "removeArea: area:%d,ds: %s, %s\n", area, param[2], client_helper.get_error_msg(ret));
+          }
+        }
+      }
+      else
+      {
+        print_help("delall");
+      }
+   }
+
+   void tair_client::do_cmd_dump_area(VSTRING &param)
+   {
+      if (param.size() != 1U) {
+         print_help("dump");
+         return;
+      }
+
+      FILE *fp = fopen(param[0],"r");
+      if (fp == NULL){
+         fprintf(stderr,"open file %s failed",param[0]);
+         return;
+      }
+
+      char buf[1024];
+      struct tm start_time;
+      struct tm end_time;
+      set<dump_meta_info> dump_set;
+      while(fgets(buf,sizeof(buf),fp) != NULL){
+         dump_meta_info info;
+         if (sscanf(buf,"%d %4d-%2d-%2d %2d:%2d:%2d %4d-%2d-%2d %2d:%2d:%2d",\
+                    &info.area,\
+                    &start_time.tm_year,&start_time.tm_mon,\
+                    &start_time.tm_mday,&start_time.tm_hour,\
+                    &start_time.tm_min,&start_time.tm_sec,
+                    &end_time.tm_year,&end_time.tm_mon,\
+                    &end_time.tm_mday,&end_time.tm_hour,\
+                    &end_time.tm_min,&end_time.tm_sec) != 13){
+            fprintf(stderr,"syntax error : %s",buf);
+            continue;
+         }
+
+         start_time.tm_year -= 1900;
+         end_time.tm_year -= 1900;
+         start_time.tm_mon -= 1;
+         end_time.tm_mon -= 1;
+
+         if (info.area < -1 || info.area >= TAIR_MAX_AREA_COUNT){
+            fprintf(stderr,"ilegal area");
+            continue;
+         }
+
+         time_t tmp_time = -1;
+         if ( (tmp_time = mktime(&start_time)) == static_cast<time_t>(-1)){
+            fprintf(stderr,"incorrect time");
+            continue;
+         }
+         info.start_time = static_cast<uint32_t>(tmp_time);
+
+         if ( (tmp_time = mktime(&end_time)) == static_cast<time_t>(-1)){
+            fprintf(stderr,"incorrect time");
+            continue;
+         }
+         info.end_time = static_cast<uint32_t>(tmp_time);
+
+         if (info.start_time < info.end_time){
+            std::swap(info.start_time,info.end_time);
+         }
+         dump_set.insert(info);
+      }
+      fclose(fp);
+
+      if (dump_set.empty()){
+         fprintf(stderr,"what do you want to dump?");
+         return;
+      }
+
+      // dump
+      int ret = client_helper.dump_area(dump_set);
+      fprintf(stderr, "dump : %s\n",client_helper.get_error_msg(ret));
+      return;
+   }
+
+   void tair_client::do_cmd_hide(VSTRING &params)
+   {
+     if (params.size() != 2) {
+       print_help("hide");
+       return ;
+     }
+     int area = atoi(params[0]);
+     data_entry key;
+     key.set_data(params[1], strlen(params[1]) + 1);
+     fprintf(stderr, "area: %d, key: %s\n", area, params[1]);
+     int ret = client_helper.hide(area, key);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+   void tair_client::do_cmd_set_migrate_wait_ms(VSTRING &param)
+   {
+     do_cmd_op_ds_or_not(param, "set_migrate_wait", TAIR_SERVER_CMD_SET_MIGRATE_WAIT_MS, 1);
+   }
+
+   void tair_client::do_cmd_get_hidden(VSTRING &params)
+   {
+     int area = 0;
+     const char *kstr = NULL;
+     if (params.size() == 2) {
+       area = atoi(params[0]);
+       kstr = params[1];
+     } else if (params.size() == 1) {
+       area = 0;
+       kstr = params[0];
+     } else {
+       print_help("gethidden");
+       return ;
+     }
+     data_entry key;
+     key.set_data(kstr, strlen(kstr) + 1);
+     data_entry *value = NULL;
+     int ret = client_helper.get_hidden(area, key, value);
+     if (value != NULL) {
+       char *p = util::string_util::conv_show_string(value->get_data(), value->get_size());
+       fprintf(stderr, "key: %s, len: %d\n", key.get_data(), key.get_size());
+       fprintf(stderr, "value: %s|%s, len: %d\n", value->get_data(), p, value->get_size());
+       free(p);
+       delete value;
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+
+   void tair_client::do_cmd_prefix_put(VSTRING &params)
+   {
+     int area = 0;
+     const char *pstr = NULL,
+                *sstr = NULL,
+                *vstr = NULL;
+     if (params.size() == 4) {
+       area = atoi(params[0]);
+       pstr = params[1];
+       sstr = params[2];
+       vstr = params[3];
+     } else if (params.size() == 3) {
+       area = 0;
+       pstr = params[0];
+       sstr = params[1];
+       vstr = params[2];
+     } else {
+       print_help("pput");
+       return ;
+     }
+     data_entry pkey,
+                skey,
+                value;
+     pkey.set_data(pstr, strlen(pstr) + 1);
+     skey.set_data(sstr, strlen(sstr) + 1);
+     value.set_data(vstr, strlen(vstr) + 1);
+
+     int ret = client_helper.prefix_put(area, pkey, skey, value, 0, 0);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+
+   void tair_client::do_cmd_prefix_puts(VSTRING &params) {
+     if (params.size() < 4 || (params.size() & 0x1) != 0) {
+       print_help("pputs");
+       return ;
+     }
+
+     int area = 0;
+     area = atoi(params[0]);
+     data_entry pkey(params[1], strlen(params[1])+1, false);
+     vector<key_value_pack_t*> packs;
+     packs.reserve((params.size() - 2)>>1);
+     for (size_t i = 2; i < params.size(); i += 2) {
+       key_value_pack_t *pack = new key_value_pack_t;
+       data_entry *skey = new data_entry(params[i], strlen(params[i])+1, false);
+       data_entry *value = new data_entry(params[i+1], strlen(params[i+1])+1, false);
+       pack->key = skey;
+       pack->value = value;
+       packs.push_back(pack);
+     }
+
+     key_code_map_t failed_map;
+     int ret = client_helper.prefix_puts(area, pkey, packs, failed_map);
+     fprintf(stderr, "%d: %s\n", ret, client_helper.get_error_msg(ret));
+     if (!failed_map.empty()) {
+       key_code_map_t::iterator itr = failed_map.begin();
+       while (itr != failed_map.end()) {
+         fprintf(stderr, "skey: %s, code: %d, msg: %s\n",
+             itr->first->get_data(), itr->second, client_helper.get_error_msg(itr->second));
+         ++itr;
+       }
+     }
+   }
+
+   void tair_client::do_cmd_prefix_get(VSTRING &params)
+   {
+     int area = 0;
+     const char *pstr = NULL,
+                *sstr = NULL;
+     if (params.size() == 3) {
+       area = atoi(params[0]);
+       pstr = params[1];
+       sstr = params[2];
+     } else if (params.size() == 2) {
+       area = 0;
+       pstr = params[0];
+       sstr = params[1];
+     } else {
+       print_help("pget");
+       return ;
+     }
+
+     data_entry pkey,
+                skey;
+     pkey.set_data(pstr, strlen(pstr) + 1);
+     skey.set_data(sstr, strlen(sstr) + 1);
+     data_entry *value = NULL;
+
+     int ret = client_helper.prefix_get(area, pkey, skey, value);
+     if (value != NULL) {
+       char *p = util::string_util::conv_show_string(value->get_data(), value->get_size());
+       fprintf(stderr, "pkey: %s, len: %d\n", pkey.get_data(), pkey.get_size());
+       fprintf(stderr, "skey: %s, len: %d\n", skey.get_data(), skey.get_size());
+       fprintf(stderr, "value: %s|%s, len %d\n", value->get_data(), p, value->get_size());
+       free(p);
+       delete value;
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+
+   void tair_client::do_cmd_prefix_gets(VSTRING &params) {
+     if (params.size() < 3) {
+       print_help("pgets");
+       return ;
+     }
+     int area = 0;
+     data_entry pkey(params[1], strlen(params[1])+1, false);
+     tair_dataentry_set skeys;
+
+     area = atoi(params[0]);
+     for (size_t i = 2; i < params.size(); ++i) {
+       data_entry *skey = new data_entry(params[i], strlen(params[i])+1, false);
+       if (!skeys.insert(skey).second) {
+         delete skey;
+       }
+     }
+
+     tair_keyvalue_map result_map;
+     key_code_map_t failed_map;
+
+     int ret = client_helper.prefix_gets(area, pkey, skeys, result_map, failed_map);
+     fprintf(stderr, "%d: %s\n", ret, client_helper.get_error_msg(ret));
+
+     if (!result_map.empty()) {
+       tair_keyvalue_map::iterator itr = result_map.begin();
+       while (itr != result_map.end()) {
+         data_entry *skey = itr->first;
+         data_entry *value = itr->second;
+         fprintf(stderr, "skey: %s, value: %s\n", skey->get_data(), value->get_data());
+         ++itr;
+       }
+       defree(result_map);
+     }
+     if (!failed_map.empty()) {
+       key_code_map_t::iterator itr = failed_map.begin();
+       while (itr != failed_map.end()) {
+         fprintf(stderr, "skey: %s, err_code: %d, err_msg: %s\n",
+             itr->first->get_data(), itr->second, client_helper.get_error_msg(itr->second));
+         ++itr;
+       }
+       defree(failed_map);
+     }
+   }
+
+   void tair_client::do_cmd_prefix_remove(VSTRING &params)
+   {
+     int area = 0;
+     const char *pstr = NULL,
+                *sstr = NULL;
+     if (params.size() == 3) {
+       area = atoi(params[0]);
+       pstr = params[1];
+       sstr = params[2];
+     } else if (params.size() == 2) {
+       area = 0;
+       pstr = params[0];
+       sstr = params[1];
+     }
+     data_entry pkey,
+                skey;
+     pkey.set_data(pstr, strlen(pstr) + 1);
+     skey.set_data(sstr, strlen(sstr) + 1);
+
+     int ret = client_helper.prefix_remove(area, pkey, skey);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+
+   void tair_client::do_cmd_prefix_removes(VSTRING &params)
+   {
+     if (params.size() < 3) {
+       print_help("premoves");
+       return ;
+     }
+     int area = atoi(params[0]);
+     data_entry pkey;
+     pkey.set_data(params[1], strlen(params[1]) + 1);
+     tair_dataentry_set skey_set;
+     for (size_t i = 2; i < params.size(); ++i) {
+       data_entry *skey = new data_entry();
+       skey->set_data(params[i], strlen(params[i]) + 1);
+       skey_set.insert(skey);
+     }
+     key_code_map_t key_code_map;
+     int ret = client_helper.prefix_removes(area, pkey, skey_set, key_code_map);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       key_code_map_t::iterator itr = key_code_map.begin();
+       while (itr != key_code_map.end()) {
+         data_entry *skey = itr->first;
+         int ret = itr->second;
+         fprintf(stderr, "failed key: %s, len: %d, code: %d, msg: %s\n",
+             skey->get_data(), skey->get_size(), ret, client_helper.get_error_msg(ret));
+         ++itr;
+         delete skey;
+       }
+     }
+   }
+
+   void tair_client::do_cmd_prefix_get_hidden(VSTRING &params)
+   {
+     int area = 0;
+     const char *pstr = NULL,
+                *sstr = NULL;
+     if (params.size() == 3) {
+       area = atoi(params[0]);
+       pstr = params[1];
+       sstr = params[2];
+     } else if (params.size() == 2) {
+       area = 0;
+       pstr = params[0];
+       sstr = params[1];
+     } else {
+       print_help("pget");
+       return ;
+     }
+
+     data_entry pkey,
+                skey;
+     pkey.set_data(pstr, strlen(pstr) + 1);
+     skey.set_data(sstr, strlen(sstr) + 1);
+     data_entry *value = NULL;
+
+     int ret = client_helper.prefix_get_hidden(area, pkey, skey, value);
+     if (value != NULL) {
+       char *p = util::string_util::conv_show_string(value->get_data(), value->get_size());
+       fprintf(stderr, "code: %d, msg: %s\n", ret, client_helper.get_error_msg(ret));
+       fprintf(stderr, "pkey: %s, len: %d\n", pkey.get_data(), pkey.get_size());
+       fprintf(stderr, "skey: %s, len: %d\n", skey.get_data(), skey.get_size());
+       fprintf(stderr, "value: %s|%s, len %d\n", value->get_data(), p, value->get_size());
+       free(p);
+       delete value;
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+
+   void tair_client::do_cmd_prefix_hide(VSTRING &params)
+   {
+     int area = 0;
+     const char *pstr = NULL,
+                *sstr = NULL;
+     if (params.size() == 3) {
+       area = atoi(params[0]);
+       pstr = params[1];
+       sstr = params[2];
+     } else if (params.size() == 2) {
+       area = 0;
+       pstr = params[0];
+       sstr = params[1];
+     }
+     data_entry pkey,
+                skey;
+     pkey.set_data(pstr, strlen(pstr) + 1);
+     skey.set_data(sstr, strlen(sstr) + 1);
+
+     int ret = client_helper.prefix_hide(area, pkey, skey);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d: %s\n", ret, client_helper.get_error_msg(ret));
+     }
+   }
+
+   void tair_client::do_cmd_prefix_hides(VSTRING &params)
+   {
+     if (params.size() < 3) {
+       print_help("phides");
+       return ;
+     }
+     int area = atoi(params[0]);
+     data_entry pkey;
+     pkey.set_data(params[1], strlen(params[1]) + 1);
+     tair_dataentry_set skey_set;
+     for (size_t i = 2; i < params.size(); ++i) {
+       data_entry *skey = new data_entry();
+       skey->set_data(params[i], strlen(params[i]) + 1);
+       skey_set.insert(skey);
+     }
+     key_code_map_t key_code_map;
+     int ret = client_helper.prefix_hides(area, pkey, skey_set, key_code_map);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       key_code_map_t::iterator itr = key_code_map.begin();
+       while (itr != key_code_map.end()) {
+         data_entry *skey = itr->first;
+         int ret = itr->second;
+         fprintf(stderr, "failed key: %s, len: %d, code: %d, msg: %s\n",
+             skey->get_data(), skey->get_size(), ret, client_helper.get_error_msg(ret));
+         ++itr;
+         delete skey;
+       }
+     }
+   }
+
+   void tair_client::do_cmd_setstatus(VSTRING &params) {
+     if (params.size() != 2) {
+       print_help("setstatus");
+       return ;
+     }
+     std::vector<std::string> cmd_params(params.begin(), params.end());
+     int ret = client_helper.op_cmd_to_cs(TAIR_SERVER_CMD_SET_GROUP_STATUS, &cmd_params, NULL);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d\n", ret);
+     }
+   }
+
+   void tair_client::do_cmd_getstatus(VSTRING &params) {
+     if (params.empty()) {
+       print_help("getstatus");
+       return ;
+     }
+     vector<string> status;
+     std::vector<std::string> cmd_params(params.begin(), params.end());
+     int ret = client_helper.op_cmd_to_cs(TAIR_SERVER_CMD_GET_GROUP_STATUS, &cmd_params, &status);
+     if (TAIR_RETURN_SUCCESS == ret) {
+       for (size_t i = 0; i < status.size(); ++i) {
+         fprintf(stderr, "\t%s\n", status[i].c_str());
+       }
+     } else {
+       fprintf(stderr, "failed with %d\n", ret);
+     }
+   }
+
+   void tair_client::do_cmd_gettmpdownsvr(VSTRING &params) {
+     if (params.empty()) {
+       print_help("gettmpdownsvr");
+       return ;
+     }
+     vector<string> down_servers;
+     std::vector<std::string> cmd_params(params.begin(), params.end());
+     int ret = client_helper.op_cmd_to_cs(TAIR_SERVER_CMD_GET_TMP_DOWN_SERVER, &cmd_params, &down_servers);
+     if (TAIR_RETURN_SUCCESS == ret) {
+       for (size_t i = 0; i < down_servers.size(); ++i) {
+         fprintf(stderr, "\t%s\n", down_servers[i].c_str());
+       }
+     } else {
+       fprintf(stderr, "failed with %d\n", ret);
+     }
+   }
+
+   void tair_client::do_cmd_resetserver(VSTRING &params) {
+     if (params.size() < 1) {
+       print_help("resetserver");
+       return ;
+     }
+     std::vector<std::string> cmd_params(params.begin(), params.end());
+     int ret = client_helper.op_cmd_to_cs(TAIR_SERVER_CMD_RESET_DS, &cmd_params, NULL);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d\n", ret);
+     }
+   }
+
+   void tair_client::do_cmd_migrate_bucket(VSTRING &params) {
+     if (params.size() < 1) {
+       print_help("migrate_bucket");
+       return ;
+     }
+     std::vector<std::string> cmd_params(params.begin(), params.end());
+     int ret = client_helper.op_cmd_to_cs(TAIR_SERVER_CMD_MIGRATE_BUCKET, &cmd_params, NULL);
+     if (ret == TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "successful\n");
+     } else {
+       fprintf(stderr, "failed with %d\n", ret);
+     }
+   }
+
+   void tair_client::do_cmd_flushmmt(VSTRING &param) {
+     do_cmd_op_ds_or_not(param, "flushmmt", TAIR_SERVER_CMD_FLUSH_MMT);
+   }
+
+   void tair_client::do_cmd_resetdb(VSTRING &param) {
+     do_cmd_op_ds_or_not(param, "resetdb", TAIR_SERVER_CMD_RESET_DB);
+   }
+
+   void tair_client::do_cmd_stat_db(VSTRING &param)
+   {
+     do_cmd_op_ds_or_not(param, "stat_db", TAIR_SERVER_CMD_STAT_DB);
+   }
+
+   void tair_client::do_cmd_release_mem(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "release_mem", TAIR_SERVER_CMD_RELEASE_MEM);
+   }
+
+   void tair_client::do_cmd_backup_db(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "backup_db", TAIR_SERVER_CMD_BACKUP_DB);
+   }
+
+   void tair_client::do_cmd_unload_backuped_db(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "unload_backuped_db", TAIR_SERVER_CMD_UNLOAD_BACKUPED_DB);
+   }
+
+   void tair_client::do_cmd_pause_gc(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "pause_gc", TAIR_SERVER_CMD_PAUSE_GC);
+   }
+
+   void tair_client::do_cmd_resume_gc(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "resume_gc", TAIR_SERVER_CMD_RESUME_GC);
+   }
+
+   void tair_client::do_cmd_pause_rsync(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "pause_rsync", TAIR_SERVER_CMD_PAUSE_RSYNC);
+   }
+
+   void tair_client::do_cmd_resume_rsync(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "resume_rsync", TAIR_SERVER_CMD_RESUME_RSYNC);
+   }
+
+   void tair_client::do_cmd_start_balance(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "start_balance", TAIR_SERVER_CMD_START_BALANCE);
+   }
+
+   void tair_client::do_cmd_stop_balance(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "stop_balance", TAIR_SERVER_CMD_STOP_BALANCE);
+   }
+
+   void tair_client::do_cmd_set_balance_wait_ms(VSTRING &param)
+   {
+     do_cmd_op_ds_or_not(param, "set_balance_wait", TAIR_SERVER_CMD_SET_BALANCE_WAIT_MS, 1);
+   }
+
+   void tair_client::do_cmd_set_config(VSTRING& param)
+   {
+     do_cmd_op_ds_or_not(param, "set_config", TAIR_SERVER_CMD_SET_CONFIG, 2);
+   }
+
+   void tair_client::do_cmd_op_ds_or_not(VSTRING &param, const char* cmd_str, ServerCmdType cmd_type, int base_param_size)
+   {
+     if (static_cast<int>(param.size()) < base_param_size || static_cast<int>(param.size()) > base_param_size + 1) {
+       print_help(cmd_str);
+       return ;
+     }
+     std::vector<std::string> cmd_params;
+     for (int i = 0; i < base_param_size; ++i) {
+       cmd_params.push_back(param[i]);
+     }
+     int ret = client_helper.op_cmd_to_ds(cmd_type, &cmd_params,
+                                          static_cast<int>(param.size()) > base_param_size ? param[base_param_size] : NULL);
+     if (ret != TAIR_RETURN_SUCCESS) {
+       fprintf(stderr, "%s fail, ret: %d\n", cmd_str, ret);
+     } else {
+       fprintf(stderr, "%s success.\n", cmd_str);
+     }
+   }
+
+   int tair_client::do_cmd_inval_dumpkey_impl(uint64_t inval_server, bool on_or_off)
+   {
+     int ret = TAIR_RETURN_SUCCESS;
+     std::vector<uint64_t> inval_server_set;
+     int ret_retrieve = client_helper.retrieve_invalidserver(inval_server_set);
+     if (ret_retrieve == TAIR_RETURN_SUCCESS)
+     {
+       std::vector<uint64_t>::iterator it = std::find(inval_server_set.begin(), inval_server_set.end(), inval_server);
+       if (it == inval_server_set.end())
+       {
+         ret = TAIR_RETURN_FAILED;
+         fprintf(stderr, "ip:port not belong the this group");
+       }
+       else
+       {
+         std::string msg;
+         if (on_or_off)
+         {
+           ret = client_helper.switch_invalidserver_dumpkey(inval_server, true, msg);
+         }
+         else
+         {
+           ret = client_helper.switch_invalidserver_dumpkey(inval_server, false, msg);
+         }
+         if (ret == TAIR_RETURN_FAILED)
+         {
+           fprintf(stderr, "msg from invalid server: %s", msg.c_str());
+         }
+       }
+     }
+     else
+     {
+       fprintf(stderr, "none invalid server found");
+       ret = TAIR_RETURN_FAILED;
+     }
+     return ret;
+   }
+   int tair_client::do_cmd_inval_dumpkey(VSTRING &params)
+   {
+     int ret = TAIR_RETURN_SUCCESS;
+     if (params.size() != 3)
+     {
+       print_help("invalcmd");
+       ret = TAIR_RETURN_FAILED;
+     }
+     else
+     {
+       bool on_or_off = false;
+       std::string cmd = params[2];
+       if (strncmp(cmd.c_str(), "on", 2) == 0)
+       {
+         on_or_off = true;
+       }
+       else if (strncmp(cmd.c_str(), "off", 3) == 0)
+       {
+         on_or_off = false;
+       }
+       else
+       {
+         fprintf(stderr, "unknown cmd, %s", cmd.c_str());
+         ret = TAIR_RETURN_FAILED;
+       }
+
+       uint64_t inval_server = 0;
+       if (ret == TAIR_RETURN_SUCCESS)
+       {
+         std::string str = params[1];
+         if (strncmp(str.c_str(), "all", 3) == 0)
+         {
+           std::vector<uint64_t> inval_server_set;
+           int ret_retrieve = client_helper.retrieve_invalidserver(inval_server_set);
+           if (ret_retrieve == TAIR_RETURN_SUCCESS)
+           {
+             for (std::vector<uint64_t>::iterator it = inval_server_set.begin(); it != inval_server_set.end(); ++it)
+             {
+               inval_server = *it;
+               ret = do_cmd_inval_dumpkey_impl(inval_server, on_or_off);
+             }
+           }
+           else
+           {
+             fprintf(stderr, "none invalid server belong to this group");
+             ret = TAIR_RETURN_FAILED;
+           }
+         }
+         else
+         {
+           // get ip::port
+           std::string ipport = params[1];
+           size_t pos = ipport.find_first_of(':');
+           if (pos == std::string::npos || pos == ipport.size())
+           {
+             fprintf(stderr, "should be ip:port, %s", ipport.c_str());
+             ret = TAIR_RETURN_FAILED;
+           }
+           else
+           {
+             std::string ipstr = ipport.substr(0, pos);
+             std::string portstr = ipport.substr(pos + 1, ipport.size());
+             inval_server = tbsys::CNetUtil::strToAddr(ipstr.c_str(), atoi(portstr.c_str()));
+             if (inval_server != 0)
+             {
+               ret = do_cmd_inval_dumpkey_impl(inval_server, on_or_off);
+             }
+           }
+         }
+       }
+     }
+     return ret;
+   }
+
+   int tair_client::do_cmd_inval_retryall(VSTRING &params)
+   {
+     int ret = TAIR_RETURN_SUCCESS;
+     if (params.size() == 1)
+     {
+       ret = client_helper.retry_all();
+     }
+     else if (params.size() == 2)
+     {
+       std::string ipport = params[1];
+       size_t pos = ipport.find_first_of(':');
+       if (pos == std::string::npos || pos == ipport.size())
+       {
+         fprintf(stderr, "should be ip:port, %s", ipport.c_str());
+         ret = TAIR_RETURN_FAILED;
+       }
+       else
+       {
+         std::string ipstr = ipport.substr(0, pos);
+         std::string portstr = ipport.substr(pos + 1, ipport.size());
+         uint64_t inval_server = tbsys::CNetUtil::strToAddr(ipstr.c_str(), atoi(portstr.c_str()));
+
+         std::vector<uint64_t> inval_server_set;
+         int ret_retrieve = client_helper.retrieve_invalidserver(inval_server_set);
+         if (ret_retrieve == TAIR_RETURN_SUCCESS)
+         {
+           std::vector<uint64_t>::iterator it = std::find(inval_server_set.begin(), inval_server_set.end(), inval_server);
+           if (it == inval_server_set.end())
+           {
+             ret = TAIR_RETURN_FAILED;
+             fprintf(stderr, "inval server: %s is not in the list.\n", params[1]);
+           }
+           else
+           {
+             ret = client_helper.retry_all(inval_server);
+           }
+         }
+         else
+         {
+           ret = TAIR_RETURN_FAILED;
+           fprintf(stderr, "can't got the inval server list.");
+         }
+       }
+     }
+     else
+     {
+       print_help("invalcmd");
+       ret = TAIR_RETURN_FAILED;
+     }
+     return ret;
+   }
+
+   int tair_client::do_cmd_inval_info(VSTRING &params)
+   {
+     int ret = TAIR_RETURN_SUCCESS;
+     if (params.size() == 2)
+     {
+       std::string ipport = params[1];
+       size_t pos = ipport.find_first_of(':');
+       if (pos == std::string::npos || pos == ipport.size())
+       {
+         fprintf(stderr, "should be ip:port, %s", ipport.c_str());
+         ret = TAIR_RETURN_FAILED;
+       }
+       else
+       {
+         std::string ipstr = ipport.substr(0, pos);
+         std::string portstr = ipport.substr(pos + 1, ipport.size());
+         uint64_t inval_server = tbsys::CNetUtil::strToAddr(ipstr.c_str(), atoi(portstr.c_str()));
+
+         std::vector<uint64_t> inval_server_set;
+         int ret_retrieve = client_helper.retrieve_invalidserver(inval_server_set);
+         if (ret_retrieve == TAIR_RETURN_SUCCESS)
+         {
+           std::vector<uint64_t>::iterator it = std::find(inval_server_set.begin(), inval_server_set.end(), inval_server);
+           if (it == inval_server_set.end())
+           {
+             ret = TAIR_RETURN_FAILED;
+             fprintf(stderr, "can't find the inval server: %s \n", params[1]);
+           }
+           else
+           {
+             std::string buffer;
+             ret = client_helper.get_invalidserver_info(inval_server, buffer);
+             if (ret == TAIR_RETURN_SUCCESS)
+             {
+               fprintf(stdout, "inval server: %s info: %s \n\n", tbsys::CNetUtil::addrToString(inval_server).c_str(),
+                   buffer.c_str());
+             }
+             else
+             {
+               fprintf(stderr, "failed to get inval server: %s info.", tbsys::CNetUtil::addrToString(inval_server).c_str());
+             }
+           }
+         }
+         else
+         {
+           ret = TAIR_RETURN_FAILED;
+           fprintf(stderr, "can't got the inval server list.");
+         }
+       }
+     }
+     else
+     {
+       ret = TAIR_RETURN_FAILED;
+       print_help("invalcmd");
+     }
+     return ret;
+   }
+   int tair_client::do_cmd_inval_retrieve(VSTRING &params)
+   {
+     int ret = TAIR_RETURN_SUCCESS;
+     std::vector<uint64_t> inval_server_set;
+     ret = client_helper.retrieve_invalidserver(inval_server_set);
+     if (ret == TAIR_RETURN_SUCCESS)
+     {
+       for (size_t i = 0; i < inval_server_set.size(); ++i)
+       {
+         fprintf(stdout, "inval server# %d: %s \n", (int)i, tbsys::CNetUtil::addrToString(inval_server_set[i]).c_str());
+       }
+     }
+     else
+     {
+       ret = TAIR_RETURN_FAILED;
+       fprintf(stdout, "failed to get inval servers.");
+     }
+     return ret;
+   }
+   void tair_client::do_cmd_to_inval(VSTRING &params)
+   {
+     if (params.size() < 1)
+     {
+       print_help("invalcmd");
+       return;
+     }
+
+     int ret = TAIR_RETURN_SUCCESS;
+     if (strncmp("retryall", params[0], 8) == 0)
+     {
+       ret = do_cmd_inval_retryall(params);
+     }
+     else if (strncmp("info", params[0], 4) == 0)
+     {
+       ret = do_cmd_inval_info(params);
+     }
+     else if (strncmp("retrieve", params[0], 8) == 0)
+     {
+       ret = do_cmd_inval_retrieve(params);
+     }
+     else if (strncmp("dumpkey", params[0], 7) == 0)
+     {
+       ret = do_cmd_inval_dumpkey(params);
+     }
+     else
+     {
+       ret = TAIR_RETURN_FAILED;
+       fprintf(stderr, "unknown cmd: %s \n\n", params[0]);
+     }
+
+     if (ret == TAIR_RETURN_SUCCESS)
+     {
+       fprintf(stdout, "success. \n");
+     }
+     else
+     {
+       fprintf(stderr, "failed, ret: %d\n\n", ret);
+     }
+   }
+
+} // namespace tair
+
+
+/*-----------------------------------------------------------------------------
+ *  main
+ *-----------------------------------------------------------------------------*/
+
+tair::tair_client _globalClient;
+void sign_handler(int sig)
+{
+   switch (sig) {
+      case SIGTERM:
+      case SIGINT:
+         _globalClient.cancel();
+   }
+}
+int main(int argc, char *argv[])
+{
+   signal(SIGPIPE, SIG_IGN);
+   signal(SIGHUP, SIG_IGN);
+   signal(SIGINT, sign_handler);
+   signal(SIGTERM, sign_handler);
+
+   //TBSYS_LOGGER.setLogLevel("DEBUG");
+   TBSYS_LOGGER.setLogLevel("ERROR");
+   if (_globalClient.parse_cmd_line(argc, argv) == false) {
+      return EXIT_FAILURE;
+   }
+   if (_globalClient.start()) {
+      return EXIT_SUCCESS;
+   } else {
+      return EXIT_FAILURE;
+   }
+}
